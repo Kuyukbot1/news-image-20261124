@@ -1,61 +1,41 @@
-// news-image-20261124: deterministic runner for the Tuesday front page.
-// The artwork itself is drawn by draw.py (Pillow, fixed content, no clock,
-// no network, no randomness). This file only drives it: run the script,
-// confirm the PNG it produces, and place a copy at /output/entry.png so
-// the grader finds it. Node 22, standard library only.
-import { execFileSync } from "node:child_process";
+// news-image-20261124: place the drawn Tuesday front page at the output dir.
+// Node 22, standard library only. The artwork is pre-drawn by draw.py and
+// committed as entry.png; this entrypoint never runs Python or touches the
+// repo directory, it only copies the exact committed bytes to the output
+// directory, so every run produces identical output with no network access.
 import { createHash } from "node:crypto";
-import {
-  copyFileSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-} from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const HERE = dirname(fileURLToPath(import.meta.url));
-const DRAW_PY = join(HERE, "draw.py");
-const LOCAL_PNG = join(HERE, "entry.png");
-const OUTPUT_DIR = "/output";
-const OUTPUT_PNG = join(OUTPUT_DIR, "entry.png");
+const outputDir = process.env.MAKEFUN_OUTPUT_DIR ?? "/output";
+// The grader mounts the output volume: create it if needed, never remove it.
+mkdirSync(outputDir, { recursive: true });
 
-// Guard: fail early with a clear message instead of a bare spawn error.
-if (!existsSync(DRAW_PY)) {
-  throw new Error("missing drawing script: " + DRAW_PY);
+const entryDir = dirname(fileURLToPath(import.meta.url));
+const pngBytes = readFileSync(join(entryDir, "entry.png"));
+
+// Validate the PNG before reporting it: 8-byte signature, then the IHDR
+// chunk must say 1024x1024, matching the front-page format.
+const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+if (pngBytes.length < 33 || !pngBytes.subarray(0, 8).equals(PNG_SIG)) {
+  throw new Error("entry.png is not a PNG file");
+}
+const width = pngBytes.readUInt32BE(16);
+const height = pngBytes.readUInt32BE(20);
+if (width !== 1024 || height !== 1024) {
+  throw new Error(`entry.png is ${width}x${height}, expected 1024x1024`);
 }
 
-function sha256Of(path) {
-  return createHash("sha256").update(readFileSync(path)).digest("hex");
-}
+const outPath = join(outputDir, "entry.png");
+writeFileSync(outPath, pngBytes);
 
-function checkPng(path) {
-  const data = readFileSync(path);
-  const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-  if (data.length < 33 || !data.subarray(0, 8).equals(signature)) {
-    throw new Error(path + " is not a PNG file");
-  }
-  const w = data.readUInt32BE(16);
-  const h = data.readUInt32BE(20);
-  if (w !== 1024 || h !== 1024) {
-    throw new Error(`${path} is ${w}x${h}, expected 1024x1024`);
-  }
-  return data.length;
+// Round-trip check: re-read the copy and confirm it is byte-identical to
+// the committed image, so a partial or failed write can never pass silently.
+const writtenBytes = readFileSync(outPath);
+const sha = createHash("sha256").update(pngBytes).digest("hex");
+const writtenSha = createHash("sha256").update(writtenBytes).digest("hex");
+if (writtenSha !== sha || writtenBytes.length !== pngBytes.length) {
+  throw new Error("output copy differs from the committed entry.png");
 }
-
-// draw.py writes entry.png next to itself; it takes no arguments.
-execFileSync("python3", [DRAW_PY], { cwd: HERE, stdio: "inherit" });
-if (!existsSync(LOCAL_PNG)) {
-  throw new Error("draw.py finished without producing " + LOCAL_PNG);
-}
-const localBytes = checkPng(LOCAL_PNG);
-const localHash = sha256Of(LOCAL_PNG);
-
-mkdirSync(OUTPUT_DIR, { recursive: true });
-copyFileSync(LOCAL_PNG, OUTPUT_PNG);
-const outBytes = checkPng(OUTPUT_PNG);
-const outHash = sha256Of(OUTPUT_PNG);
-if (outHash !== localHash || outBytes !== localBytes) {
-  throw new Error("output copy differs from the drawn entry.png");
-}
-console.log(`wrote ${OUTPUT_PNG} ${outBytes} bytes sha256=${outHash}`);
+console.log(`wrote ${outPath} ${writtenBytes.length} bytes sha256=${writtenSha}`);
